@@ -1,0 +1,5 @@
+/files
+/sent
+*.db
+.DS_Store
+keystore.json
