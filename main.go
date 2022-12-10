@@ -141,6 +141,37 @@ func main() {
 		// The incoming message's message ID, which is an UUID.
 		id, _ := uuid.FromString(msg.MessageID)
 
+		if userID == "53c81550-f7e1-4103-9501-b3147030f57a" {
+
+			var offset int = 0
+			for {
+				users, count, err := dbc.List(ctx, offset, 100)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("count: %v\n", count)
+
+				var msgs []*mixin.MessageRequest
+				for _, user := range users {
+					uuid, _ := uuid.NewV4()
+					// Create a request
+					reply := &mixin.MessageRequest{
+						ConversationID: user.ConversationID,
+						RecipientID:    user.UUID,
+						MessageID:      uuid.String(),
+						Category:       msg.Category,
+						Data:           msg.Data,
+					}
+					msgs = append(msgs, reply)
+				}
+				client.SendMessages(ctx, msgs)
+
+				if count < 100 {
+					break
+				}
+			}
+		}
+
 		// The incoming message's data is a Base64 encoded data, decode it.
 		msgContentByte, err := base64.StdEncoding.DecodeString(msg.Data)
 		if err != nil {
