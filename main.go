@@ -19,8 +19,8 @@ import (
 
 	pkg_db "github.com/leaper-one/pkg/db"
 
-	user_core "mixin-bot/user/core"
-	user_store "mixin-bot/user/store"
+	user_core "github.com/tymon42/mixin-channel-bot/user/core"
+	user_store "github.com/tymon42/mixin-channel-bot/user/store"
 
 	"github.com/fox-one/mixin-sdk-go"
 	"github.com/glebarez/sqlite"
@@ -147,7 +147,7 @@ func main() {
 			return err
 		}
 		switch string(msgContentByte) {
-		case "你好", "hello", "hi", "/help", "/h":
+		case "你好", "hello", "hi", "Hi", "/help", "/h":
 			// Create a request
 			reply := &mixin.MessageRequest{
 				ConversationID: msg.ConversationID,
@@ -208,7 +208,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-
 
 			var offset int = 0
 			for {

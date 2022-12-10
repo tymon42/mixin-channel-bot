@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"mixin-bot/user/core"
+	"github.com/tymon42/mixin-channel-bot/user/core"
 
 	"github.com/leaper-one/pkg/db"
 	"gorm.io/gorm"
@@ -71,5 +71,5 @@ func (s *MixinUserStore) List(_ context.Context, offset int, limit int) ([]*core
 	if err := s.db.View().Offset(offset).Limit(limit).Find(&users).Count(&count).Error; err != nil {
 		return nil, 0, err
 	}
-	return users, offset+int(count), nil
+	return users, offset + int(count), nil
 }
