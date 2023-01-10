@@ -6,26 +6,20 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"image"
 	_ "image/jpeg"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
-	pkg_db "github.com/leaper-one/pkg/db"
-
-	user_core "github.com/tymon42/mixin-channel-bot/user/core"
-	user_store "github.com/tymon42/mixin-channel-bot/user/store"
+	"github.com/robfig/cron/v3"
+	"github.com/tymon42/mixin-channel-bot/user/core"
+	"github.com/tymon42/mixin-channel-bot/util"
 
 	"github.com/fox-one/mixin-sdk-go"
-	"github.com/glebarez/sqlite"
 	"github.com/gofrs/uuid"
-	"gorm.io/gorm"
+	user_core "github.com/tymon42/mixin-channel-bot/user/core"
 )
 
 var (
@@ -33,105 +27,84 @@ var (
 	config = flag.String("config", "keystore.json", "keystore file path")
 )
 
-// saveMixinUser save mixin user to db
-func saveMixinUser(ctx context.Context, dbc user_core.MixinUserStore, mixinUser *user_core.MixinUser) error {
-	err := dbc.Save(ctx, mixinUser)
-	if err != nil {
-		return err
-	}
-
-	return nil
+type Services struct {
+	Dbc    core.MixinUserStore
+	Client *mixin.Client
 }
 
-// deleteMixinUser delete mixin user from db
-func deleteMixinUser(ctx context.Context, dbc user_core.MixinUserStore, mixinUser *user_core.MixinUser) error {
-	err := dbc.Delete(ctx, mixinUser)
-	if err != nil {
-		return err
+func (s Services) pubPhotoMsgToAll(ctx context.Context, attachmentID string, width, height int) error {
+	// 向所有用户发送图片
+	var offset int = 0
+	for { // 为最多一百个用户发送图片
+		users, count, err := s.Dbc.List(ctx, offset, 100)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("count: %v\n", count)
+
+		data := &mixin.ImageMessage{
+			AttachmentID: attachmentID,
+			MimeType:     "image/jpeg",
+			Width:        width,
+			Height:       height,
+			Size:         4096,
+			Thumbnail:    "base64 encoded",
+		}
+
+		// turn data into json
+		dataByte, _ := json.Marshal(data)
+		// turn dataByte to base64
+		encoded := base64.StdEncoding.EncodeToString(dataByte)
+
+		// 生成发送消息的请求
+		var msgs []*mixin.MessageRequest
+		for _, user := range users {
+			uuid, _ := uuid.NewV4()
+			// Create a request
+			reply := &mixin.MessageRequest{
+				ConversationID: user.ConversationID,
+				RecipientID:    user.UUID,
+				MessageID:      uuid.String(),
+				Category:       mixin.MessageCategoryPlainImage,
+				Data:           encoded,
+			}
+			msgs = append(msgs, reply)
+		}
+		s.Client.SendMessages(ctx, msgs)
+
+		// TODO: 有点不太确定要不要加这个一百
+		offset += 100
+
+		// count 小于 100 说明已经处理完最后一批用户了
+		if count < 100 {
+			break
+		}
 	}
 	return nil
-}
-
-// moveFile move file to another directory
-func moveFile(src, dst string) error {
-	err := os.Rename(src, dst)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// uploadPhoto send photo to mixin
-func uploadPhoto(ctx context.Context, client *mixin.Client, photoPath string) (string, int, int, error) {
-	// Read the photo file
-	f, err := ioutil.ReadFile(photoPath)
-	if err != nil {
-		return "", 0, 0, err
-	}
-
-	// open the photo file
-	photo, err := os.Open(photoPath)
-	if err != nil {
-		return "", 0, 0, err
-	}
-	defer photo.Close()
-
-	c, _, err := image.DecodeConfig(photo)
-	if err != nil {
-		return "", 0, 0, err
-	}
-
-	attachment, err := client.CreateAttachment(ctx)
-	if err != nil {
-		return "", 0, 0, err
-	}
-	err = mixin.UploadAttachment(ctx, attachment, f)
-	if err != nil {
-		return "", 0, 0, err
-	}
-
-	return attachment.AttachmentID, c.Width, c.Height, nil
 }
 
 func main() {
 	// Use flag package to parse the parameters
 	flag.Parse()
 
-	// Open the keystore file
-	f, err := os.Open(*config)
+	// 初始化 mixin client 和数据库
+	client, dbc, err := util.InitMixinAndDB(*config)
 	if err != nil {
-		log.Panicln(err)
+		fmt.Printf("err: %v\n", err)
 	}
 
-	// Read the keystore file as json into mixin.Keystore, which is a go struct
-	var store mixin.Keystore
-	if err := json.NewDecoder(f).Decode(&store); err != nil {
-		log.Panicln(err)
+	services := &Services{
+		Client: client,
+		Dbc:    dbc,
 	}
 
-	// Create a Mixin Client from the keystore, which is the instance to invoke Mixin APIs
-	client, err := mixin.NewFromKeystore(&store)
-	if err != nil {
-		log.Panicln(err)
-	}
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
+	defer stop()
 
-	// Connect to db
-	db, err := gorm.Open(sqlite.Open("mixin-bot.db"), &gorm.Config{})
-	if err != nil {
-		log.Printf("open db failed, err: %v", err)
-	}
-	err = db.AutoMigrate(&user_core.MixinUser{})
-	if err != nil {
-		log.Printf("auto migrate failed, err: %v", err)
-	}
-	dbc := user_store.NewMixinUserStore(&pkg_db.DB{
-		Write: db,
-		Read:  db,
-	})
-
-	// Prepare the message loop that handle every incoming messages,
-	// and reply it with the same content.
-	// We use a callback function to handle them.
 	h := func(ctx context.Context, msg *mixin.MessageView, userID string) error {
 		// if there is no valid user id in the message, drop it
 		if userID, _ := uuid.FromString(msg.UserID); userID == uuid.Nil {
@@ -139,38 +112,7 @@ func main() {
 		}
 
 		// The incoming message's message ID, which is an UUID.
-		id, _ := uuid.FromString(msg.MessageID)
-
-		if userID == "53c81550-f7e1-4103-9501-b3147030f57a" {
-
-			var offset int = 0
-			for {
-				users, count, err := dbc.List(ctx, offset, 100)
-				if err != nil {
-					return err
-				}
-				fmt.Printf("count: %v\n", count)
-
-				var msgs []*mixin.MessageRequest
-				for _, user := range users {
-					uuid, _ := uuid.NewV4()
-					// Create a request
-					reply := &mixin.MessageRequest{
-						ConversationID: user.ConversationID,
-						RecipientID:    user.UUID,
-						MessageID:      uuid.String(),
-						Category:       msg.Category,
-						Data:           msg.Data,
-					}
-					msgs = append(msgs, reply)
-				}
-				client.SendMessages(ctx, msgs)
-
-				if count < 100 {
-					break
-				}
-			}
-		}
+		msgId, _ := uuid.FromString(msg.MessageID)
 
 		// The incoming message's data is a Base64 encoded data, decode it.
 		msgContentByte, err := base64.StdEncoding.DecodeString(msg.Data)
@@ -183,33 +125,34 @@ func main() {
 			reply := &mixin.MessageRequest{
 				ConversationID: msg.ConversationID,
 				RecipientID:    msg.UserID,
-				MessageID:      uuid.NewV5(id, "reply").String(),
+				MessageID:      uuid.NewV5(msgId, "reply").String(),
 				Category:       mixin.MessageCategoryPlainText,
 				Data:           base64.StdEncoding.EncodeToString([]byte("你好，欢迎关注本频道，\n\n/help /h 查看帮助\n\n/subscribe /s 订阅\n\n/unsubscribe /u 取消订阅")),
 			}
 			return client.SendMessage(ctx, reply)
 		case "/subscribe", "/s":
-			saveMixinUser(ctx, dbc, &user_core.MixinUser{
+			dbc.Save(ctx, &user_core.MixinUser{
 				UUID:           msg.UserID,
 				ConversationID: msg.ConversationID,
 			})
-			// Create a request
+			// 回复订阅成功
 			reply := &mixin.MessageRequest{
 				ConversationID: msg.ConversationID,
 				RecipientID:    msg.UserID,
-				MessageID:      uuid.NewV5(id, "reply").String(),
+				MessageID:      uuid.NewV5(msgId, "reply").String(),
 				Category:       mixin.MessageCategoryPlainText,
 				Data:           base64.StdEncoding.EncodeToString([]byte("订阅成功")),
 			}
 			return client.SendMessage(ctx, reply)
 		case "/unsubscribe", "/u":
-			deleteMixinUser(ctx, dbc, &user_core.MixinUser{
+			dbc.Delete(ctx, &user_core.MixinUser{
 				UUID: msg.UserID,
 			})
+			// 回复取消订阅成功
 			reply := &mixin.MessageRequest{
 				ConversationID: msg.ConversationID,
 				RecipientID:    msg.UserID,
-				MessageID:      uuid.NewV5(id, "reply").String(),
+				MessageID:      uuid.NewV5(msgId, "reply").String(),
 				Category:       mixin.MessageCategoryPlainText,
 				Data:           base64.StdEncoding.EncodeToString([]byte("取消订阅成功")),
 			}
@@ -219,86 +162,35 @@ func main() {
 		}
 	}
 
-	ctx, stop := signal.NotifyContext(
-		context.Background(),
-		syscall.SIGINT,
-		syscall.SIGTERM,
-	)
-	defer stop()
-
-	go func() {
-		// var files []string
-		root := "./files"
-		err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-			// files = append(files, path)
-			if !strings.Contains(path, ".jpg") {
-				return nil
-			}
-			fmt.Println(path)
-			attachmentID, width, height, err := uploadPhoto(ctx, client, path)
+	c := cron.New()
+	c.AddFunc("30 9 * * *", func() {
+		// 重复三次
+		for i := 0; i < 3; i++ {
+			root := "./files"
+			// 获取第一张图片
+			photoPath, photoName, err := util.GetDirFirstPhoto(root)
 			if err != nil {
-				return err
+				fmt.Printf("err: %v\n", err)
 			}
 
-			var offset int = 0
-			for {
-				users, count, err := dbc.List(ctx, offset, 100)
-				if err != nil {
-					return err
-				}
-				fmt.Printf("count: %v\n", count)
+			// 上传图片，获取图片比例信息
+			attachmentInfo, width, height, err := util.UploadPhoto(ctx, client, photoPath)
+			if err != nil {
+				fmt.Printf("err: %v\n", err)
+			}
 
-				data := &mixin.ImageMessage{
-					AttachmentID: attachmentID,
-					MimeType:     "image/jpeg",
-					Width:        width,
-					Height:       height,
-					Size:         4096,
-					Thumbnail:    "base64 encoded",
-				}
-
-				// turn data into json
-				dataByte, _ := json.Marshal(data)
-				// turn dataByte to base64
-				encoded := base64.StdEncoding.EncodeToString(dataByte)
-
-				var msgs []*mixin.MessageRequest
-				for _, user := range users {
-					uuid, _ := uuid.NewV4()
-					// Create a request
-					reply := &mixin.MessageRequest{
-						ConversationID: user.ConversationID,
-						RecipientID:    user.UUID,
-						MessageID:      uuid.String(),
-						Category:       mixin.MessageCategoryPlainImage,
-						Data:           encoded,
-					}
-					msgs = append(msgs, reply)
-				}
-				client.SendMessages(ctx, msgs)
-
-				if count < 100 {
-					break
-				}
+			err = services.pubPhotoMsgToAll(ctx, attachmentInfo.AttachmentID, width, height)
+			if err != nil {
+				fmt.Printf("err: %v\n", err)
 			}
 
 			// move file to sent folder
-			err = os.Rename(path, "./sent/"+path)
-			if err != nil {
-				return err
-			}
-
-			time.Sleep(30 * time.Minute)
-			// time.Sleep(1 * time.Second)
-
-			return nil
-		})
-		if err != nil {
-			log.Panicln(err)
+			os.Rename(photoPath, "./sent/"+photoName)
 		}
-	}()
+	})
 
-	// Start the message loop.
+	c.Start()
+
 	for {
 		select {
 		case <-ctx.Done():

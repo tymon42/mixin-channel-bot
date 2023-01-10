@@ -7,6 +7,7 @@ require (
 	github.com/glebarez/sqlite v1.6.0
 	github.com/gofrs/uuid v4.3.1+incompatible
 	github.com/leaper-one/pkg v0.0.3
+	github.com/robfig/cron/v3 v3.0.0
 	gorm.io/gorm v1.24.2
 )
 

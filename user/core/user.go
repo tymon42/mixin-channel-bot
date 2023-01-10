@@ -9,8 +9,8 @@ import (
 type (
 	MixinUser struct {
 		gorm.Model
-		UUID           string `gorm:"size:36;unique_index;index" json:"uuid,omitempty"`
-		ConversationID string `gorm:"size:36;unique_index" json:"conversation_id,omitempty"`
+		UUID           string `gorm:"size:36;unique_index;index" json:"uuid,omitempty"`      // mixin user uuid
+		ConversationID string `gorm:"size:36;unique_index" json:"conversation_id,omitempty"` // mixin conversation id
 	}
 
 	MixinUserStore interface {

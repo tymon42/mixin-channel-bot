@@ -25,6 +25,7 @@ func toUpdateParams(user *core.MixinUser) map[string]interface{} {
 	}
 }
 
+// update depends on the primary key or the uuid of mixin user to update the user
 func update(db *db.DB, user *core.MixinUser) (int64, error) {
 	updates := toUpdateParams(user)
 	tx := db.Update().Model(user).Where("id = ? OR uuid = ?", user.ID, user.UUID).Updates(updates)
