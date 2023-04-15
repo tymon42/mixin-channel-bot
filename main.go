@@ -7,14 +7,12 @@ import (
 	"flag"
 	"fmt"
 	_ "image/jpeg"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/robfig/cron/v3"
-	"github.com/tymon42/mixin-channel-bot/user/core"
 	"github.com/tymon42/mixin-channel-bot/util"
 
 	"github.com/fox-one/mixin-sdk-go"
@@ -28,10 +26,11 @@ var (
 )
 
 type Services struct {
-	Dbc    core.MixinUserStore
+	Dbc    user_core.MixinUserStore
 	Client *mixin.Client
 }
 
+// pubPhotoMsgToAll 向所有用户发送图片
 func (s Services) pubPhotoMsgToAll(ctx context.Context, attachmentID string, width, height int) error {
 	// 向所有用户发送图片
 	var offset int = 0
@@ -83,6 +82,78 @@ func (s Services) pubPhotoMsgToAll(ctx context.Context, attachmentID string, wid
 	return nil
 }
 
+// pubTextMsgToAll 向所有用户发送文字
+func (s Services) pubTextMsgToAll(ctx context.Context, text string) error {
+	// 向所有用户发送文字
+	var offset int = 0
+	for { // 为最多一百个用户发送文字
+		users, count, err := s.Dbc.List(ctx, offset, 100)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("count: %v\n", count)
+
+		// 生成发送消息的请求
+		var msgs []*mixin.MessageRequest
+		for _, user := range users {
+			uuid, _ := uuid.NewV4()
+			// Create a request
+			reply := &mixin.MessageRequest{
+				ConversationID: user.ConversationID,
+				RecipientID:    user.UUID,
+				MessageID:      uuid.String(),
+				Category:       mixin.MessageCategoryPlainText,
+				Data:           base64.StdEncoding.EncodeToString([]byte(text)),
+			}
+			msgs = append(msgs, reply)
+		}
+		s.Client.SendMessages(ctx, msgs)
+
+		// TODO: 有点不太确定要不要加这个一百
+		offset += 100
+
+		// count 小于 100 说明已经处理完最后一批用户了
+		if count < 100 {
+			break
+		}
+	}
+	return nil
+}
+
+// pubPhotoMsgToBotUser 向 bot 用户发送图片
+func (s Services) pubPhotoMsgToBotUser(ctx context.Context, attachmentID string, width, height int) error {
+	// 向 Bot 用户发送图片
+	data := &mixin.ImageMessage{
+		AttachmentID: attachmentID,
+		MimeType:     "image/jpeg",
+		Width:        width,
+		Height:       height,
+		Size:         4096,
+		Thumbnail:    "base64 encoded",
+	}
+
+	// turn data into json
+	dataByte, _ := json.Marshal(data)
+	// turn dataByte to base64
+	encoded := base64.StdEncoding.EncodeToString(dataByte)
+
+	// 生成发送消息的请求
+	uuid, _ := uuid.NewV4()
+	msg := &mixin.MessageRequest{
+		ConversationID: mixin.UniqueConversationID("c66ed586-33fc-44b5-b3f0-071083ffd049", "64abce35-ad54-4828-9e87-b2f46148b0ad"),
+		RecipientID:    "64abce35-ad54-4828-9e87-b2f46148b0ad", //
+		MessageID:      uuid.String(),
+		Category:       mixin.MessageCategoryPlainImage,
+		Data:           encoded,
+	}
+	err := s.Client.SendMessage(ctx, msg)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func main() {
 	// Use flag package to parse the parameters
 	flag.Parse()
@@ -105,70 +176,15 @@ func main() {
 	)
 	defer stop()
 
-	h := func(ctx context.Context, msg *mixin.MessageView, userID string) error {
-		// if there is no valid user id in the message, drop it
-		if userID, _ := uuid.FromString(msg.UserID); userID == uuid.Nil {
-			return nil
-		}
+	c := cron.New() // 创建一个定时任务
 
-		// The incoming message's message ID, which is an UUID.
-		msgId, _ := uuid.FromString(msg.MessageID)
-
-		// The incoming message's data is a Base64 encoded data, decode it.
-		msgContentByte, err := base64.StdEncoding.DecodeString(msg.Data)
-		if err != nil {
-			return err
-		}
-		switch string(msgContentByte) {
-		case "你好", "hello", "hi", "Hi", "/help", "/h":
-			// Create a request
-			reply := &mixin.MessageRequest{
-				ConversationID: msg.ConversationID,
-				RecipientID:    msg.UserID,
-				MessageID:      uuid.NewV5(msgId, "reply").String(),
-				Category:       mixin.MessageCategoryPlainText,
-				Data:           base64.StdEncoding.EncodeToString([]byte("你好，欢迎关注本频道，\n\n/help /h 查看帮助\n\n/subscribe /s 订阅\n\n/unsubscribe /u 取消订阅")),
-			}
-			return client.SendMessage(ctx, reply)
-		case "/subscribe", "/s":
-			dbc.Save(ctx, &user_core.MixinUser{
-				UUID:           msg.UserID,
-				ConversationID: msg.ConversationID,
-			})
-			// 回复订阅成功
-			reply := &mixin.MessageRequest{
-				ConversationID: msg.ConversationID,
-				RecipientID:    msg.UserID,
-				MessageID:      uuid.NewV5(msgId, "reply").String(),
-				Category:       mixin.MessageCategoryPlainText,
-				Data:           base64.StdEncoding.EncodeToString([]byte("订阅成功")),
-			}
-			return client.SendMessage(ctx, reply)
-		case "/unsubscribe", "/u":
-			dbc.Delete(ctx, &user_core.MixinUser{
-				UUID: msg.UserID,
-			})
-			// 回复取消订阅成功
-			reply := &mixin.MessageRequest{
-				ConversationID: msg.ConversationID,
-				RecipientID:    msg.UserID,
-				MessageID:      uuid.NewV5(msgId, "reply").String(),
-				Category:       mixin.MessageCategoryPlainText,
-				Data:           base64.StdEncoding.EncodeToString([]byte("取消订阅成功")),
-			}
-			return client.SendMessage(ctx, reply)
-		default:
-			return nil
-		}
-	}
-
-	c := cron.New()
-	c.AddFunc("30 9 * * *", func() {
+	// 添加定时任务
+	c.AddFunc("2,3,4 18 * * *", func() {
 		// 重复三次
-		for i := 0; i < 3; i++ {
-			root := "./files"
+		for i := 0; i < 1; i++ {
+			root := "./files/夜半丽影"
 			// 获取第一张图片
-			photoPath, photoName, err := util.GetDirFirstPhoto(root)
+			photoPath, _, err := util.GetDirFirstPhoto(root)
 			if err != nil {
 				fmt.Printf("err: %v\n", err)
 			}
@@ -179,27 +195,35 @@ func main() {
 				fmt.Printf("err: %v\n", err)
 			}
 
-			err = services.pubPhotoMsgToAll(ctx, attachmentInfo.AttachmentID, width, height)
+			err = services.pubPhotoMsgToBotUser(ctx, attachmentInfo.AttachmentID, width, height)
 			if err != nil {
 				fmt.Printf("err: %v\n", err)
 			}
 
 			// move file to sent folder
-			os.Rename(photoPath, "./sent/"+photoName)
+			err = os.Remove(photoPath)
+			if err != nil {
+				fmt.Printf("err: %v\n", err)
+			}
+
+			time.Sleep(1 * time.Second)
 		}
 	})
 
+	// 启动定时任务
 	c.Start()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Second):
-			// Pass the callback function into the `BlazeListenFunc`
-			if err := client.LoopBlaze(ctx, mixin.BlazeListenFunc(h)); err != nil {
-				log.Printf("LoopBlaze: %v", err)
-			}
-		}
+	// 启动服务, 保证服务一直运行
+	// should use a simple channel send/receive instead of select with a single case
+	select {
+	case <-ctx.Done():
+		fmt.Println("Done")
+
+		// 关闭定时任务
+		c.Stop()
+
+		// return 0
+		os.Exit(0)
 	}
+
 }
